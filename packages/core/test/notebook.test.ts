@@ -9,8 +9,7 @@ const {
   serializeNotebook,
   relationFolder,
   relTo,
-  scoreEntry,
-  scoreRelation,
+  createRanker,
   applyOps,
   unifiedDiff,
 } = Notebook
@@ -72,14 +71,17 @@ describe("Notebook tree placement", () => {
 })
 
 describe("Notebook scoring", () => {
-  test("scores entries and relations by keyword overlap", () => {
-    const entry = { name: "auth.ts", summary: "handles login tokens", based_on: [], confidence: "observed" as const }
-    expect(scoreEntry(entry, "login token flow")).toBeGreaterThan(0)
-    expect(scoreEntry(entry, "unrelated")).toBe(0)
-
-    const rel = { from: "a.ts", to: "b.ts", description: "wires the database", based_on: [], confidence: "observed" as const }
-    expect(scoreRelation(rel, "database wiring")).toBeGreaterThan(0)
-    expect(scoreRelation(rel, "zzz")).toBe(0)
+  test("ranks entries and relations by query match", () => {
+    const nb = emptyNotebook("/root/src", "src")
+    nb.entries["auth.ts"] = { name: "auth.ts", summary: "handles login tokens", based_on: [], confidence: "observed" }
+    nb.relations = [
+      { from: "a.ts", to: "b.ts", description: "wires the database", based_on: [], confidence: "observed" },
+    ]
+    const ranker = createRanker([nb])
+    expect(ranker.scoreEntry(nb.entries["auth.ts"], "login token flow")).toBeGreaterThan(0)
+    expect(ranker.scoreEntry(nb.entries["auth.ts"], "unrelated")).toBe(0)
+    expect(ranker.scoreRelation(nb.relations[0], "database wiring")).toBeGreaterThan(0)
+    expect(ranker.scoreRelation(nb.relations[0], "zzz")).toBe(0)
   })
 })
 

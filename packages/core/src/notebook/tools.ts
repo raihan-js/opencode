@@ -13,10 +13,9 @@ import { NotebookEvidence, isDirty } from "./evidence"
 import { allNotebooks, buildSkeleton, hydrateBasedOn, itemFreshness, loadNotebook, notebookPathFor } from "./store"
 import {
   applyOps,
+  createRanker,
   relationFolder,
   relTo,
-  scoreEntry,
-  scoreRelation,
   serializeNotebook,
   unifiedDiff,
   NOTEBOOK_NAME,
@@ -430,10 +429,11 @@ function scoredEntries(
   query: string,
   limit: number,
 ): Array<{ nb: Notebook; name: string; summary: string; basedOn: BasedOn; score: number }> {
+  const ranker = createRanker(notebooks)
   const out: Array<{ nb: Notebook; name: string; summary: string; basedOn: BasedOn; score: number }> = []
   for (const nb of notebooks) {
     for (const entry of Object.values(nb.entries)) {
-      const score = scoreEntry(entry, query)
+      const score = ranker.scoreEntry(entry, query)
       if (score > 0) out.push({ nb, name: entry.name, summary: entry.summary, basedOn: entry.based_on, score })
     }
   }
@@ -445,10 +445,11 @@ function scoredRelations(
   query: string,
   limit: number,
 ): Array<{ nb: Notebook; rel: { from: string; to: string; description: string }; basedOn: BasedOn; score: number }> {
+  const ranker = createRanker(notebooks)
   const out: Array<{ nb: Notebook; rel: { from: string; to: string; description: string }; basedOn: BasedOn; score: number }> = []
   for (const nb of notebooks) {
     for (const rel of nb.relations) {
-      const score = scoreRelation(rel, query)
+      const score = ranker.scoreRelation(rel, query)
       if (score > 0) out.push({ nb, rel, basedOn: rel.based_on, score })
     }
   }

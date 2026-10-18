@@ -207,13 +207,6 @@ export function tokens(input: string): Set<string> {
   return set
 }
 
-export function overlap(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 || b.size === 0) return 0
-  let inter = 0
-  for (const token of a) if (b.has(token)) inter++
-  return inter / Math.min(a.size, b.size)
-}
-
 const CONFIDENCE_RANK: Record<Confidence, number> = { observed: 0, inferred: 1, verified: 2 }
 
 export function maxConfidence(a: Confidence, b: Confidence): Confidence {
@@ -250,25 +243,108 @@ export function relTo(fromPath: string, folder: string): string {
 
 // ---------- scoring ----------
 
-export function scoreEntry(entry: Entry, query: string): number {
-  const q = tokens(query)
-  if (q.size === 0) return 0
-  let score = overlap(tokens(entry.summary), q) * 3
-  score += overlap(tokens(entry.name), q) * 2
-  for (const item of entry.based_on) score += overlap(tokens(item), q)
+const BM25_K1 = 1.2
+const BM25_B = 0.75
+/** Field weights: name hits are precise, summaries carry the signal, source paths are weak evidence. */
+const FIELD_WEIGHTS = { name: 2.5, summary: 1, basedOn: 0.5 }
+/** Bonus when the full query appears verbatim in the summary. */
+const PHRASE_BONUS = 1.5
+
+export type Ranker = {
+  scoreEntry: (entry: Entry, query: string) => number
+  scoreRelation: (rel: Relation, query: string) => number
+}
+
+type FieldTokens = {
+  name: string[]
+  summary: string[]
+  basedOn: string[]
+  /** Lowercased raw summary, for the phrase bonus. */
+  summaryRaw: string
+}
+
+const fieldTokens = (name: string, summary: string, basedOn: ReadonlyArray<string>): FieldTokens => ({
+  name: Array.from(tokens(name)),
+  summary: Array.from(tokens(summary)),
+  basedOn: basedOn.flatMap((item) => Array.from(tokens(item))),
+  summaryRaw: summary.toLowerCase(),
+})
+
+type Corpus = {
+  docs: number
+  df: Map<string, number>
+  avg: { name: number; summary: number; basedOn: number }
+}
+
+function buildCorpus(docs: ReadonlyArray<FieldTokens>): Corpus {
+  const df = new Map<string, number>()
+  let nameLen = 0
+  let summaryLen = 0
+  let basedOnLen = 0
+  for (const doc of docs) {
+    for (const term of new Set([...doc.name, ...doc.summary, ...doc.basedOn])) df.set(term, (df.get(term) ?? 0) + 1)
+    nameLen += doc.name.length
+    summaryLen += doc.summary.length
+    basedOnLen += doc.basedOn.length
+  }
+  const docs1 = docs.length
+  return {
+    docs: docs1,
+    df,
+    avg: { name: docs1 ? nameLen / docs1 : 0, summary: docs1 ? summaryLen / docs1 : 0, basedOn: docs1 ? basedOnLen / docs1 : 0 },
+  }
+}
+
+function idf(corpus: Corpus, term: string): number {
+  const df = corpus.df.get(term) ?? 0
+  return Math.log(1 + (corpus.docs - df + 0.5) / (df + 0.5))
+}
+
+function fieldScore(corpus: Corpus, terms: ReadonlyArray<string>, field: string[], avg: number): number {
+  if (field.length === 0 || avg === 0) return 0
+  const counts = new Map<string, number>()
+  for (const term of field) counts.set(term, (counts.get(term) ?? 0) + 1)
+  const lengthNorm = 1 - BM25_B + (BM25_B * field.length) / avg
+  let score = 0
+  for (const term of terms) {
+    const tf = counts.get(term)
+    if (!tf) continue
+    score += (idf(corpus, term) * tf * (BM25_K1 + 1)) / (tf + BM25_K1 * lengthNorm)
+  }
   return score
 }
 
-export function scoreRelation(rel: Relation, query: string): number {
+function rank(corpus: Corpus, doc: FieldTokens, query: string): number {
   const q = tokens(query)
   if (q.size === 0) return 0
-  let score = overlap(tokens(rel.description), q) * 3
-  score += overlap(tokens(`${rel.from} ${rel.to}`), q) * 2
-  for (const item of rel.based_on) score += overlap(tokens(item), q)
+  const terms = Array.from(q)
+  const score =
+    FIELD_WEIGHTS.name * fieldScore(corpus, terms, doc.name, corpus.avg.name) +
+    FIELD_WEIGHTS.summary * fieldScore(corpus, terms, doc.summary, corpus.avg.summary) +
+    FIELD_WEIGHTS.basedOn * fieldScore(corpus, terms, doc.basedOn, corpus.avg.basedOn)
+  const phrase = query.toLowerCase().replace(/[^a-z0-9\s]/g, " ").trim()
+  if (phrase.length > 2 && doc.summaryRaw.includes(phrase)) return score + PHRASE_BONUS
   return score
 }
 
-// ---------- commit ops ----------
+/**
+ * Ranks notebook entries and relations against a query with BM25 over three
+ * fields (name, summary, source paths), using corpus statistics from every
+ * notebook the caller will search, plus a bonus for verbatim query phrases.
+ * Build once per notes_get call, from the same notebook list that is scored.
+ */
+export function createRanker(notebooks: ReadonlyArray<Notebook>): Ranker {
+  const entryCorpus = buildCorpus(
+    notebooks.flatMap((nb) => Object.values(nb.entries).map((entry) => fieldTokens(entry.name, entry.summary, entry.based_on))),
+  )
+  const relationCorpus = buildCorpus(
+    notebooks.flatMap((nb) => nb.relations.map((rel) => fieldTokens(`${rel.from} ${rel.to}`, rel.description, rel.based_on))),
+  )
+  return {
+    scoreEntry: (entry, query) => rank(entryCorpus, fieldTokens(entry.name, entry.summary, entry.based_on), query),
+    scoreRelation: (rel, query) => rank(relationCorpus, fieldTokens(`${rel.from} ${rel.to}`, rel.description, rel.based_on), query),
+  }
+}
 
 export type Op =
   | { kind: "folder"; summary: string; basedOn: BasedOn }
